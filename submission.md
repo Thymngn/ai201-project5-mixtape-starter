@@ -45,3 +45,31 @@ return [song.to_dict() for song in songs]
 File: `services/playlist_service.py`, in `get_playlist_songs`.
 
 **Verification:** Ran `pytest tests/test_playlists.py -v` after the fix — all 3 tests pass, including the two that failed beforehand.
+
+### Bug 3: Same song shows up twice (or more) in search
+
+**Symptom:** Per the project brief, a song with multiple tags could appear multiple times in a single search result (once per tag).
+
+**How I reproduced it:** `pytest tests/test_search.py -v` passed 5/5 even before any change, so the test suite alone didn't show a live failure. To check whether the underlying query was actually safe, I ran the raw SQL that `search_songs` built by hand against a song seeded with 3 tags (via `song_tags.insert()`, mirroring `seed_data.py`'s "3+ tag" songs). Fetching the statement directly with `db.session.execute(q.statement).fetchall()` returned **3 raw rows** for that one song — one per matching tag row from the `LEFT OUTER JOIN` against `song_tags`. So the query itself does fan out at the SQL level; the reason the Python-level test didn't catch it is that the installed SQLAlchemy version (2.0.51) automatically de-duplicates ORM entities returned by a legacy `Query.all()` call, silently absorbing the fan-out before it reaches calling code. On an older SQLAlchemy version (or via `.session.execute(select(...))` without `.unique()`), this same query would return duplicate `Song` objects.
+
+**Root cause:** In `services/search_service.py::search_songs`, the query joined `Song` to the `song_tags` association table purely to filter by title/artist — but tags aren't used in the `WHERE` clause at all, and `Song.to_dict()` already loads tags independently via the `Song.tags` relationship (`lazy="subquery"` in `models.py`). The join was unnecessary and caused a one-row-per-tag fan-out for any song with more than one tag:
+```python
+results = (
+    db.session.query(Song)
+    .outerjoin(song_tags, Song.id == song_tags.c.song_id)
+    .filter(db.or_(Song.title.ilike(f"%{query}%"), Song.artist.ilike(f"%{query}%")))
+    .all()
+)
+```
+
+**Fix:** Removed the unnecessary join (and the now-unused `Tag`/`song_tags` imports) so the query only touches the `song` table and can no longer fan out:
+```python
+results = (
+    db.session.query(Song)
+    .filter(db.or_(Song.title.ilike(f"%{query}%"), Song.artist.ilike(f"%{query}%")))
+    .all()
+)
+```
+File: `services/search_service.py`.
+
+**Verification:** Re-ran the raw-SQL check from the reproduction step — it now returns exactly 1 row for the same 3-tag song, confirming the fan-out is gone at the SQL level (not just masked by ORM dedup). Also ran the full suite, `pytest tests/ -v` — all 13 tests pass with no regressions.
