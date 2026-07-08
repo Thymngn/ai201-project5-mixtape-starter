@@ -25,3 +25,23 @@ else:
 File: `services/streak_service.py`, line 73.
 
 **Verification:** Ran `pytest tests/test_streaks.py -v` after the fix — all 5 tests pass, including `test_streak_increments_on_sunday`, which failed before the fix.
+
+### Bug 2: Last song in a playlist never shows up
+
+**Symptom:** `GET /playlists/<id>/songs` (and anything built on `get_playlist_songs`) always returns one fewer song than the playlist actually contains — the last song by position is missing.
+
+**How I reproduced it:** Ran the existing test suite `pytest tests/test_playlists.py -v` before making any changes. The fixture `seed_playlist` creates a playlist with 5 songs at positions 1–5. `test_playlist_returns_all_songs` failed with `assert 4 == 5` (only 4 of 5 songs returned), and `test_playlist_returns_songs_in_order` failed because `"Track 5"` was missing from the result — confirming the last song by position is the one being dropped, not a random one.
+
+**Root cause:** In `services/playlist_service.py::get_playlist_songs`, after querying songs in position order, the return line sliced the list:
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
+`songs[:-1]` excludes the last element of the list. Since `songs` was already ordered ascending by position, this always dropped the highest-position (i.e. last-added) song in the playlist, regardless of playlist length.
+
+**Fix:** Removed the slice so every song in the ordered query result is included:
+```python
+return [song.to_dict() for song in songs]
+```
+File: `services/playlist_service.py`, in `get_playlist_songs`.
+
+**Verification:** Ran `pytest tests/test_playlists.py -v` after the fix — all 3 tests pass, including the two that failed beforehand.
