@@ -4,22 +4,21 @@ services/feed_service.py — Mixtape
 Handles the "Friends Listening Now" feed and activity feed logic.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timezone
 from sqlalchemy import desc
 from app import db
 from models import User, Song, ListeningEvent
 
 
-RECENT_THRESHOLD = timedelta(hours=24)
-
-
-def get_friends_listening_now(user_id: str) -> list[dict]:
+def get_friends_listening_now(user_id: str, now: datetime | None = None) -> list[dict]:
     """
-    Return a list of friends who have listened to something recently,
+    Return a list of friends who have listened to something today,
     along with the song they were listening to.
 
     Args:
         user_id: The ID of the current user.
+        now: The current datetime (UTC). Defaults to the real current time;
+            callers (e.g. tests) may pass an explicit value.
 
     Returns:
         A list of dicts, each with 'friend', 'song', and 'listened_at' keys,
@@ -29,7 +28,8 @@ def get_friends_listening_now(user_id: str) -> list[dict]:
     if not user:
         raise ValueError(f"User {user_id} not found")
 
-    cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD
+    now = now or datetime.now(timezone.utc)
+    start_of_today = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
     friend_ids = [f.id for f in user.friends]
 
     if not friend_ids:
@@ -39,7 +39,7 @@ def get_friends_listening_now(user_id: str) -> list[dict]:
         db.session.query(ListeningEvent)
         .filter(
             ListeningEvent.user_id.in_(friend_ids),
-            ListeningEvent.listened_at >= cutoff,
+            ListeningEvent.listened_at >= start_of_today,
         )
         .order_by(desc(ListeningEvent.listened_at))
         .all()

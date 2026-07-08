@@ -73,3 +73,27 @@ results = (
 File: `services/search_service.py`.
 
 **Verification:** Re-ran the raw-SQL check from the reproduction step — it now returns exactly 1 row for the same 3-tag song, confirming the fan-out is gone at the SQL level (not just masked by ORM dedup). Also ran the full suite, `pytest tests/ -v` — all 13 tests pass with no regressions.
+
+### Bug 4: Friends Listening Now shows people from yesterday evening
+
+**Symptom (reported by nova):** Checking the "listening now" feed in the morning showed a friend (darius) as currently listening, even though his last listen was the previous night before bed and he hadn't opened the app since. Expected: only friends who listened *today* should appear.
+
+**How I reproduced it:** In `services/feed_service.py`, `get_friends_listening_now` filtered events with `ListeningEvent.listened_at >= (datetime.now(timezone.utc) - RECENT_THRESHOLD)`, where `RECENT_THRESHOLD = timedelta(hours=24)`. I reproduced nova's exact scenario: a listening event at 11pm one day, then checked the feed at 9am the next day (~10 hours later). Since 10 hours is well inside the 24-hour rolling window, the friend still showed up as "listening now" — matching the reported bug exactly. This is captured as an automated test in `tests/test_feed.py::test_friend_from_last_night_not_shown_this_morning`.
+
+**Root cause:** The feed used a rolling 24-hour window (`now - 24h`) to decide who counts as "listening now," instead of a calendar-day boundary. A rolling window has no relationship to what a user perceives as "today" — anything from the previous evening stays inside a 24-hour window well into the next morning. The correct semantics (per the ticket: "only friends who have listened today appear") needed a fixed cutoff at the start of the current calendar day (midnight UTC), the same style of date-based comparison already used correctly in `streak_service.py`.
+
+**Fix:** Replaced the rolling-window cutoff with a start-of-today cutoff, and added an optional `now` parameter (mirroring `update_listening_streak(user, now)` in `streak_service.py`) so the current time can be injected in tests instead of relying on `datetime.now()` inside the function:
+```python
+def get_friends_listening_now(user_id: str, now: datetime | None = None) -> list[dict]:
+    ...
+    now = now or datetime.now(timezone.utc)
+    start_of_today = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
+    ...
+    .filter(
+        ListeningEvent.user_id.in_(friend_ids),
+        ListeningEvent.listened_at >= start_of_today,
+    )
+```
+Removed the now-unused `RECENT_THRESHOLD` constant. File: `services/feed_service.py`.
+
+**Verification:** Added `tests/test_feed.py` with two cases: a friend who listened at 11pm the previous night is correctly excluded when checked at 9am the next day, and a friend who listened at 2am *that same day* is correctly still shown at 9am. To confirm this is a genuine regression test (not just a passing-by-coincidence test), I manually restored the old `now - timedelta(hours=24)` logic (keeping the new `now` parameter) and reran `pytest tests/test_feed.py -v`: the "not shown this morning" test failed with `assert feed == []` actually returning darius in the list — reproducing nova's bug precisely. Restoring the fix and rerunning the full suite (`pytest tests/ -v`) shows all 15 tests passing, including both new feed tests.
